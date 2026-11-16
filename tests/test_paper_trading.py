@@ -1,7 +1,15 @@
 from datetime import datetime, timedelta, timezone
 import unittest
 
-from market_bot import Direction, ExitReason, PaperTradingAccount, Signal
+from market_bot import (
+    Direction,
+    ExitReason,
+    PaperTradingAccount,
+    Signal,
+    format_position,
+    format_signal,
+    format_stats,
+)
 
 
 BASE_TIME = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -67,6 +75,16 @@ class PaperTradingTests(unittest.TestCase):
         self.assertEqual(stats.losing_positions, 1)
         self.assertAlmostEqual(stats.win_rate, 0.5)
         self.assertAlmostEqual(stats.net_pnl_usd, 0)
+
+    def test_interface_messages_are_in_russian(self) -> None:
+        account = PaperTradingAccount()
+        signal = Signal("BTCUSDT", Direction.LONG, 100, 110, 95, confidence=0.75)
+        position = account.open_signal(signal, opened_at=BASE_TIME)
+
+        self.assertIn("Сценарий: Рост", format_signal(signal))
+        self.assertIn("Уверенность: 75,00%", format_signal(signal))
+        self.assertIn("Статус: Открыта", format_position(position))
+        self.assertIn("Статистика бумажной торговли", format_stats(account.stats()))
 
 
 if __name__ == "__main__":
