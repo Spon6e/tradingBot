@@ -66,6 +66,14 @@ class PaperTradingAccount:
             self._positions[signal.signal_id] = position
             return position
 
+    def restore_position(self, position: Position) -> Position:
+        """Restore a position loaded from persistent storage."""
+        with self._lock:
+            if position.signal.signal_id in self._positions:
+                raise ValueError(f"signal {position.signal.signal_id} is already tracked")
+            self._positions[position.signal.signal_id] = position
+            return position
+
     def update_price(
         self,
         symbol: str,

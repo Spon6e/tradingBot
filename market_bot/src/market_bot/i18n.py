@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .models import Direction, ExitReason, Position, Signal
 from .paper_trading import TradingStats
+from .analysis import AnalysisResult
 
 
 def direction_label(direction: Direction) -> str:
@@ -51,6 +52,26 @@ def format_signal(signal: Signal, *, stake_usd: float = 100.0) -> str:
         f"Стоп: {format_number(signal.stop_price)}\n"
         f"Виртуальная сумма: {format_money(stake_usd)}"
         f"{confidence}"
+    )
+
+
+def format_analysis(result: AnalysisResult, *, stake_usd: float = 100.0) -> str:
+    if result.signal is None:
+        return (
+            f"ℹ️ Анализ {result.symbol} ({result.timeframe})\n"
+            "Сигнал: Нейтральный\n"
+            "Условия для открытия виртуальной позиции не выполнены.\n\n"
+            f"Оценка модели: {result.score}\n"
+            f"RSI: {format_number(result.rsi, 1)}\n"
+            "Причины:\n"
+            + "\n".join(f"• {reason}" for reason in result.reasons)
+        )
+    return (
+        format_signal(result.signal, stake_usd=stake_usd)
+        + f"\n\nОценка модели: {result.score}\n"
+        + "Причины:\n"
+        + "\n".join(f"• {reason}" for reason in result.reasons)
+        + "\n\n⚠️ Это вероятностный технический сценарий, а не гарантия результата."
     )
 
 

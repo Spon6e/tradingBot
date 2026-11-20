@@ -7,7 +7,17 @@ name = "market-analysis-bot"
 version = "0.1.0"
 description = "Market analysis bot with fixed-stake paper trading"
 requires-python = ">=3.11"
+readme = "README.md"
+
+[project.scripts]
+market-analysis-bot = "market_bot.__main__:main"
+
+[project.optional-dependencies]
+telegram = ["aiogram>=3.31,<4"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
