@@ -1,0 +1,4 @@
+include README.md .env.example constraints.txt .gitignore .dockerignore Dockerfile compose.yaml
+recursive-include tests *.py
+recursive-include tools *.py
+recursive-include .github *.yml

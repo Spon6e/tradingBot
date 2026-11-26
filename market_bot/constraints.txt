@@ -1,0 +1,8 @@
+# Tested direct dependencies; transitive dependencies are resolved by pip per platform.
+aiogram==3.34.0
+matplotlib==3.11.2
+python-dotenv==1.2.4
+yfinance==1.8.0
+requests==2.34.2
+build==1.6.1
+ruff==0.17.6

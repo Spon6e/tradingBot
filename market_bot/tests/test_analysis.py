@@ -49,9 +49,8 @@ class AnalysisTests(unittest.TestCase):
         provider = InMemoryMarketDataProvider({("BTCUSDT", "1h"): candles})
         service = MarketBotService(provider)
 
-        report = service.analyze_and_track("BTCUSDT", "1h")
+        report = service.analyze_and_track("BTCUSDT", "1h", now=candles[-1].end("1h"))
 
         self.assertIsNotNone(report.position)
         self.assertEqual(report.position.stake_usd, 100)
         self.assertEqual(len(service.open_positions()), 1)
-

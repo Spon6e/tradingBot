@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from math import isfinite
 from uuid import uuid4
 
 
@@ -37,6 +38,10 @@ class Signal:
     signal_id: str = field(default_factory=lambda: uuid4().hex)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.direction, Direction):
+            raise ValueError("Некорректное направление прогноза")
+        if self.created_at.tzinfo is None:
+            raise ValueError("Время прогноза должно содержать часовой пояс")
         if not self.symbol.strip():
             raise ValueError("symbol must not be empty")
         for name, value in (
@@ -44,7 +49,7 @@ class Signal:
             ("target_price", self.target_price),
             ("stop_price", self.stop_price),
         ):
-            if value <= 0:
+            if not isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be greater than zero")
 
         if self.direction is Direction.LONG:
@@ -73,8 +78,14 @@ class Position:
     closed_at: datetime | None = None
     pnl_usd: float | None = None
     return_pct: float | None = None
+    owner_chat_id: int = 0
+    commission_rate: float = 0.0
+    expires_at: datetime | None = None
+    last_candle_at: datetime | None = None
+    notified: bool = False
+    pending: bool = False
+    filled_at: datetime | None = None
 
     @property
     def is_open(self) -> bool:
         return self.exit_price is None
-

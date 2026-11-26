@@ -13,3 +13,16 @@ dist/
 *.egg-info/
 .idea/
 .vscode/
+.venv/
+venv/
+data/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.sqlite3-journal
+.ruff_cache/
+.coverage
+htmlcov/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,12 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MARKET_BOT_DB: /app/data/market_bot.sqlite3
+    volumes:
+      - market-data:/app/data
+    stop_grace_period: 90s
+volumes:
+  market-data:

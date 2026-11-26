@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+.venv
+venv
+data
+*.sqlite*
+__pycache__
+*.egg-info
+build
+dist
+tests
+work

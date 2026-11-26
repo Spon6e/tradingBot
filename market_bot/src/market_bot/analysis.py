@@ -49,7 +49,7 @@ def _rsi(values: Sequence[float], period: int = 14) -> float:
         average_gain = ((average_gain * (period - 1)) + gain) / period
         average_loss = ((average_loss * (period - 1)) + loss) / period
     if average_loss == 0:
-        return 100.0
+        return 100.0 if average_gain else 50.0
     relative_strength = average_gain / average_loss
     return 100 - (100 / (1 + relative_strength))
 
@@ -80,6 +80,8 @@ class TechnicalAnalyzer:
     def analyze(self, symbol: str, timeframe: str, candles: Sequence[Candle]) -> AnalysisResult:
         if len(candles) < self.MIN_CANDLES:
             raise ValueError(f"Для анализа нужно минимум {self.MIN_CANDLES} свечей")
+        if any(a.timestamp >= b.timestamp for a, b in zip(candles, candles[1:])):
+            raise ValueError("Свечи должны идти по времени без повторов")
         closes = [candle.close for candle in candles]
         latest = candles[-1]
         ema_fast = _ema(closes, 20)
@@ -92,14 +94,14 @@ class TechnicalAnalyzer:
         if ema_fast > ema_slow:
             score += 1
             reasons.append("EMA 20 выше EMA 50: краткосрочный тренд положительный")
-        else:
+        elif ema_fast < ema_slow:
             score -= 1
             reasons.append("EMA 20 ниже EMA 50: краткосрочный тренд отрицательный")
 
         if latest.close > ema_fast:
             score += 1
             reasons.append("цена находится выше EMA 20")
-        else:
+        elif latest.close < ema_fast:
             score -= 1
             reasons.append("цена находится ниже EMA 20")
 
@@ -125,9 +127,12 @@ class TechnicalAnalyzer:
         else:
             direction = None
 
-        confidence = min(0.90, 0.50 + abs(score) * 0.10) if direction else None
+        # Эвристический балл не является вероятностью успеха.
+        confidence = None
         target_price = stop_price = None
         signal = None
+        if atr <= 0:
+            direction = None
         if direction is Direction.LONG:
             target_price = latest.close + 2 * atr
             stop_price = max(latest.close - atr, latest.close * 0.01)

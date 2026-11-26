@@ -47,4 +47,3 @@ class StorageTests(unittest.TestCase):
 
         self.assertEqual(len(another_account.positions()), 1)
         self.assertEqual(another_account.positions()[0].signal.symbol, "AAPL")
-

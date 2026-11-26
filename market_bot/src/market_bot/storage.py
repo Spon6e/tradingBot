@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from datetime import datetime
 from pathlib import Path
 from threading import RLock
@@ -56,18 +57,40 @@ class SQLitePositionStore:
                 )
                 """
             )
+            columns = {r[1] for r in self._connection.execute("PRAGMA table_info(positions)")}
+            if "state_json" not in columns:
+                self._connection.execute("ALTER TABLE positions ADD COLUMN state_json TEXT")
+            self._connection.execute("""CREATE TABLE IF NOT EXISTS watches (
+                chat_id INTEGER NOT NULL, symbol TEXT NOT NULL, timeframe TEXT NOT NULL,
+                PRIMARY KEY (chat_id, symbol, timeframe))""")
 
     def save_position(self, position: Position) -> None:
         signal = position.signal
+        state = json.dumps(
+            {
+                "owner_chat_id": position.owner_chat_id,
+                "commission_rate": position.commission_rate,
+                "expires_at": _datetime_to_text(position.expires_at),
+                "last_candle_at": _datetime_to_text(position.last_candle_at),
+                "notified": position.notified,
+                "pending": position.pending,
+                "filled_at": _datetime_to_text(position.filled_at),
+            }
+        )
         with self._lock, self._connection:
             self._connection.execute(
                 """
                 INSERT INTO positions (
                     signal_id, symbol, direction, entry_price, target_price, stop_price,
                     timeframe, confidence, created_at, stake_usd, quantity, opened_at,
-                    exit_price, exit_reason, closed_at, pnl_usd, return_pct
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    exit_price, exit_reason, closed_at, pnl_usd, return_pct, state_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(signal_id) DO UPDATE SET
+                    entry_price = excluded.entry_price,
+                    target_price = excluded.target_price,
+                    stop_price = excluded.stop_price,
+                    quantity = excluded.quantity,
+                    state_json = excluded.state_json,
                     exit_price = excluded.exit_price,
                     exit_reason = excluded.exit_reason,
                     closed_at = excluded.closed_at,
@@ -92,6 +115,7 @@ class SQLitePositionStore:
                     _datetime_to_text(position.closed_at),
                     position.pnl_usd,
                     position.return_pct,
+                    state,
                 ),
             )
 
@@ -103,6 +127,7 @@ class SQLitePositionStore:
         return [self._row_to_position(row) for row in rows]
 
     def _row_to_position(self, row: sqlite3.Row) -> Position:
+        state = json.loads(row["state_json"] or "{}")
         signal = Signal(
             symbol=row["symbol"],
             direction=Direction(row["direction"]),
@@ -124,7 +149,38 @@ class SQLitePositionStore:
             closed_at=_text_to_datetime(row["closed_at"]),
             pnl_usd=row["pnl_usd"],
             return_pct=row["return_pct"],
+            owner_chat_id=state.get("owner_chat_id", 0),
+            commission_rate=state.get("commission_rate", 0.0),
+            expires_at=_text_to_datetime(state.get("expires_at")),
+            last_candle_at=_text_to_datetime(state.get("last_candle_at")),
+            notified=state.get("notified", False),
+            pending=state.get("pending", False),
+            filled_at=_text_to_datetime(state.get("filled_at")),
         )
+
+    def watches(self, chat_id: int | None = None) -> list[tuple[int, str, str]]:
+        with self._lock:
+            sql = "SELECT chat_id, symbol, timeframe FROM watches"
+            rows = self._connection.execute(
+                sql
+                + (" WHERE chat_id = ?" if chat_id is not None else "")
+                + " ORDER BY chat_id, symbol",
+                (chat_id,) if chat_id is not None else (),
+            ).fetchall()
+            return [tuple(row) for row in rows]
+
+    def add_watch(self, chat_id: int, symbol: str, timeframe: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT OR IGNORE INTO watches VALUES (?, ?, ?)", (chat_id, symbol, timeframe)
+            )
+
+    def remove_watch(self, chat_id: int, symbol: str, timeframe: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "DELETE FROM watches WHERE chat_id=? AND symbol=? AND timeframe=?",
+                (chat_id, symbol, timeframe),
+            )
 
     def close(self) -> None:
         with self._lock:

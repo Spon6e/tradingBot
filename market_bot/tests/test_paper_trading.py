@@ -21,41 +21,32 @@ class PaperTradingTests(unittest.TestCase):
         signal = Signal("BTCUSDT", Direction.LONG, 100, 110, 95)
         account.open_signal(signal, opened_at=BASE_TIME)
 
-        closed = account.update_price(
-            "BTCUSDT", 110, observed_at=BASE_TIME + timedelta(hours=1)
-        )
+        closed = account.update_price("BTCUSDT", 110, observed_at=BASE_TIME + timedelta(hours=1))
 
         self.assertEqual(len(closed), 1)
         self.assertIs(closed[0].exit_reason, ExitReason.TARGET)
         self.assertAlmostEqual(closed[0].pnl_usd, 10)
         self.assertAlmostEqual(closed[0].return_pct, 0.10)
 
-
     def test_short_stop_creates_negative_result(self) -> None:
         account = PaperTradingAccount()
         signal = Signal("AAPL", Direction.SHORT, 100, 90, 105)
         account.open_signal(signal, opened_at=BASE_TIME)
 
-        closed = account.update_price(
-            "AAPL", 105, observed_at=BASE_TIME + timedelta(hours=1)
-        )
+        closed = account.update_price("AAPL", 105, observed_at=BASE_TIME + timedelta(hours=1))
 
         self.assertIs(closed[0].exit_reason, ExitReason.STOP)
         self.assertAlmostEqual(closed[0].pnl_usd, -5)
-
 
     def test_timeout_closes_at_observed_price(self) -> None:
         account = PaperTradingAccount(default_timeout=timedelta(hours=24))
         signal = Signal("ETHUSDT", Direction.LONG, 100, 120, 80)
         account.open_signal(signal, opened_at=BASE_TIME)
 
-        closed = account.update_price(
-            "ETHUSDT", 103, observed_at=BASE_TIME + timedelta(hours=24)
-        )
+        closed = account.update_price("ETHUSDT", 103, observed_at=BASE_TIME + timedelta(hours=24))
 
         self.assertIs(closed[0].exit_reason, ExitReason.TIMEOUT)
         self.assertAlmostEqual(closed[0].pnl_usd, 3)
-
 
     def test_stats_track_open_and_closed_positions(self) -> None:
         account = PaperTradingAccount()
@@ -82,11 +73,10 @@ class PaperTradingTests(unittest.TestCase):
         position = account.open_signal(signal, opened_at=BASE_TIME)
 
         self.assertIn("Сценарий: Рост", format_signal(signal))
-        self.assertIn("Уверенность: 75,00%", format_signal(signal))
+        self.assertIn("Оценка модели (не вероятность): 75,00%", format_signal(signal))
         self.assertIn("Статус: Открыта", format_position(position))
         self.assertIn("Статистика бумажной торговли", format_stats(account.stats()))
 
 
 if __name__ == "__main__":
     unittest.main()
-

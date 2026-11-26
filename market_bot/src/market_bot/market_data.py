@@ -1,15 +1,34 @@
 from __future__ import annotations
 
-import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from typing import Protocol, Sequence
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
 
 class MarketDataError(RuntimeError):
-    """Ошибка получения или разбора рыночных данных."""
+    """Источник недоступен или вернул неполные данные."""
+
+
+TIMEFRAMES = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
+
+
+def timeframe_delta(timeframe: str) -> timedelta:
+    if timeframe not in TIMEFRAMES:
+        raise ValueError("Доступны 15m, 1h, 4h, 1d; для акций: 1h, 1d")
+    return timedelta(seconds=TIMEFRAMES[timeframe])
+
+
+def normalize_symbol(symbol: str) -> str:
+    symbol = symbol.strip().upper().replace("/", "")
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9.\-]{0,19}", symbol):
+        raise ValueError("Некорректный тикер. Примеры: BTCUSDT, ETHUSDT, AAPL, MSFT")
+    return symbol
+
+
+def is_crypto(symbol: str) -> bool:
+    return symbol.endswith(("USDT", "USDC"))
 
 
 @dataclass(frozen=True)
@@ -20,159 +39,145 @@ class Candle:
     low: float
     close: float
     volume: float
+    closed_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.timestamp.tzinfo is None:
-            raise ValueError("timestamp must contain timezone information")
-        prices = (self.open, self.high, self.low, self.close, self.volume)
-        if any(value <= 0 for value in prices):
-            raise ValueError("candle prices and volume must be greater than zero")
+            raise ValueError("Время свечи должно содержать часовой пояс")
+        if self.closed_at is not None:
+            if self.closed_at.tzinfo is None or self.closed_at <= self.timestamp:
+                raise ValueError("Некорректное время закрытия свечи")
+        if any(not isfinite(v) or v <= 0 for v in (self.open, self.high, self.low, self.close)):
+            raise ValueError("Цены должны быть положительными конечными числами")
+        if not isfinite(self.volume) or self.volume < 0:
+            raise ValueError("Объём должен быть неотрицательным конечным числом")
         if self.high < max(self.open, self.close) or self.low > min(self.open, self.close):
-            raise ValueError("candle high/low values are inconsistent")
+            raise ValueError("Некорректные максимум и минимум свечи")
+
+    def end(self, timeframe: str) -> datetime:
+        return self.closed_at or self.timestamp + timeframe_delta(timeframe)
 
 
 class MarketDataProvider(Protocol):
-    def get_candles(self, symbol: str, timeframe: str, limit: int = 200) -> list[Candle]:
-        ...
+    def get_candles(self, symbol: str, timeframe: str, limit: int = 200) -> list[Candle]: ...
 
 
 class InMemoryMarketDataProvider:
-    """Источник свечей для тестов и локальной разработки."""
-
     def __init__(self, candles: dict[tuple[str, str], Sequence[Candle]]) -> None:
-        self._candles = {
-            (symbol.upper(), timeframe): list(values)
-            for (symbol, timeframe), values in candles.items()
-        }
+        self._candles = {(s.upper(), t): list(v) for (s, t), v in candles.items()}
 
     def get_candles(self, symbol: str, timeframe: str, limit: int = 200) -> list[Candle]:
-        if limit <= 0:
-            raise ValueError("limit must be positive")
         try:
-            values = self._candles[(symbol.upper(), timeframe)]
+            return self._candles[(normalize_symbol(symbol), timeframe)][-limit:]
         except KeyError as exc:
-            raise MarketDataError(f"Нет свечей для {symbol.upper()} ({timeframe})") from exc
-        return values[-limit:]
+            raise MarketDataError(f"Нет свечей для {symbol} ({timeframe})") from exc
 
 
 class BinanceMarketDataProvider:
-    """Получает публичные свечи Spot через REST API Binance."""
+    """Только завершённые свечи; биржевые ключи не нужны."""
 
     BASE_URL = "https://data-api.binance.vision/api/v3/klines"
-    TIMEFRAMES = {
-        "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h",
-        "12h", "1d", "3d", "1w", "1M",
-    }
 
-    def __init__(self, *, timeout: float = 10.0) -> None:
+    def __init__(self, *, timeout: float = 15.0) -> None:
         self.timeout = timeout
 
     def get_candles(self, symbol: str, timeframe: str, limit: int = 200) -> list[Candle]:
-        symbol = symbol.upper().strip()
-        if not symbol or timeframe not in self.TIMEFRAMES:
-            raise ValueError("Укажите корректный символ и таймфрейм Binance")
-        if not 1 <= limit <= 1000:
-            raise ValueError("Количество свечей должно быть от 1 до 1000")
+        import requests
 
-        query = urlencode({"symbol": symbol, "interval": timeframe, "limit": limit})
-        request = Request(
-            f"{self.BASE_URL}?{query}",
-            headers={"User-Agent": "market-analysis-bot/0.1"},
-        )
+        symbol = normalize_symbol(symbol)
+        timeframe_delta(timeframe)
+        if not 1 <= limit <= 999:
+            raise ValueError("Количество свечей должно быть от 1 до 999")
         try:
-            with urlopen(request, timeout=self.timeout) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except Exception as exc:
-            raise MarketDataError(f"Не удалось получить данные Binance: {exc}") from exc
-
-        if not isinstance(payload, list):
-            message = payload.get("msg", "неизвестная ошибка") if isinstance(payload, dict) else payload
-            raise MarketDataError(f"Binance вернул ошибку: {message}")
-
-        try:
-            return [
-                Candle(
-                    timestamp=datetime.fromtimestamp(row[0] / 1000, tz=timezone.utc),
-                    open=float(row[1]),
-                    high=float(row[2]),
-                    low=float(row[3]),
-                    close=float(row[4]),
-                    volume=float(row[5]),
-                )
-                for row in payload
-            ]
-        except (IndexError, TypeError, ValueError) as exc:
-            raise MarketDataError("Binance вернул данные свечей в неожиданном формате") from exc
-
-
-class YahooFinanceMarketDataProvider:
-    """Публичный источник дневных и часовых свечей для акций."""
-
-    BASE_URL = "https://query1.finance.yahoo.com/v8/finance/chart"
-    TIMEFRAME_CONFIG = {
-        "1d": ("1d", "2y"),
-        "1h": ("1h", "60d"),
-    }
-
-    def __init__(self, *, timeout: float = 10.0) -> None:
-        self.timeout = timeout
-
-    def get_candles(self, symbol: str, timeframe: str, limit: int = 200) -> list[Candle]:
-        symbol = symbol.upper().strip()
-        if not symbol or timeframe not in self.TIMEFRAME_CONFIG:
-            raise ValueError("Для акций доступны таймфреймы 1d и 1h")
-        if not 1 <= limit <= 2000:
-            raise ValueError("Количество свечей должно быть от 1 до 2000")
-
-        interval, range_name = self.TIMEFRAME_CONFIG[timeframe]
-        query = urlencode({"range": range_name, "interval": interval, "events": "history"})
-        request = Request(
-            f"{self.BASE_URL}/{symbol}?{query}",
-            headers={"User-Agent": "market-analysis-bot/0.1"},
-        )
-        try:
-            with urlopen(request, timeout=self.timeout) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except Exception as exc:
-            raise MarketDataError(f"Не удалось получить данные акции: {exc}") from exc
-
-        try:
-            result = payload["chart"]["result"][0]
-            timestamps = result["timestamp"]
-            quote = result["indicators"]["quote"][0]
+            response = requests.get(
+                self.BASE_URL,
+                params={"symbol": symbol, "interval": timeframe, "limit": limit + 1},
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, list):
+                raise ValueError("Неожиданный ответ")
+            now = datetime.now(timezone.utc)
             candles = []
-            for index, timestamp in enumerate(timestamps):
-                values = {key: quote[key][index] for key in ("open", "high", "low", "close", "volume")}
-                if any(value is None for value in values.values()):
+            for row in payload:
+                end = datetime.fromtimestamp((row[6] + 1) / 1000, timezone.utc)
+                if end > now:
                     continue
                 candles.append(
                     Candle(
-                        timestamp=datetime.fromtimestamp(timestamp, tz=timezone.utc),
-                        open=float(values["open"]),
-                        high=float(values["high"]),
-                        low=float(values["low"]),
-                        close=float(values["close"]),
-                        volume=max(float(values["volume"]), 0.0000001),
+                        datetime.fromtimestamp(row[0] / 1000, timezone.utc),
+                        *(float(row[i]) for i in range(1, 6)),
+                        closed_at=end,
                     )
                 )
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise MarketDataError("Источник акций вернул данные в неожиданном формате") from exc
+            if not candles:
+                raise ValueError("Нет завершённых свечей")
+            return candles[-limit:]
+        except (requests.RequestException, ValueError, TypeError, IndexError) as exc:
+            raise MarketDataError(
+                "Не удалось получить свечи Binance. Проверьте тикер, интернет и доступность сервиса."
+            ) from exc
 
-        if not candles:
-            raise MarketDataError(f"Нет доступных свечей для акции {symbol}")
-        return candles[-limit:]
+
+class YahooFinanceMarketDataProvider:
+    """Акции в USD; неофициальный источник Yahoo через yfinance."""
+
+    def __init__(self, *, timeout: float = 15.0) -> None:
+        self.timeout = timeout
+
+    def get_candles(self, symbol: str, timeframe: str, limit: int = 200) -> list[Candle]:
+        import pandas as pd
+        import yfinance as yf
+
+        symbol = normalize_symbol(symbol)
+        if timeframe not in {"1h", "1d"}:
+            raise ValueError("Для акций доступны интервалы 1h и 1d")
+        if not 1 <= limit <= 999:
+            raise ValueError("Количество свечей должно быть от 1 до 999")
+        try:
+            ticker = yf.Ticker(symbol)
+            frame = ticker.history(
+                period="2y",
+                interval=timeframe,
+                auto_adjust=False,
+                actions=False,
+                timeout=self.timeout,
+                raise_errors=True,
+            )
+            if ticker.get_history_metadata().get("currency") != "USD":
+                raise MarketDataError("Поддерживаются акции с котировками в USD")
+            now = datetime.now(timezone.utc)
+            candles = []
+            for index, row in frame.iterrows():
+                start = index.to_pydatetime().astimezone(timezone.utc)
+                end = (
+                    (index + pd.DateOffset(days=1)).to_pydatetime().astimezone(timezone.utc)
+                    if timeframe == "1d"
+                    else start + timedelta(hours=1)
+                )
+                if end > now:
+                    continue
+                values = [float(row[k]) for k in ("Open", "High", "Low", "Close", "Volume")]
+                if all(isfinite(v) for v in values):
+                    candles.append(Candle(start, *values, closed_at=end))
+            if not candles:
+                raise MarketDataError("Нет завершённых свечей для выбранной акции")
+            return candles[-limit:]
+        except MarketDataError:
+            raise
+        except Exception as exc:
+            raise MarketDataError(
+                "Не удалось получить данные Yahoo Finance. Проверьте тикер и повторите позже."
+            ) from exc
 
 
 class RoutedMarketDataProvider:
-    """Выбирает крипто- или фондовый источник по формату тикера."""
-
-    CRYPTO_QUOTES = ("USDT", "USDC", "BUSD", "BTC", "ETH")
-
     def __init__(self, crypto: MarketDataProvider, stocks: MarketDataProvider) -> None:
-        self.crypto = crypto
-        self.stocks = stocks
+        self.crypto, self.stocks = crypto, stocks
 
     def get_candles(self, symbol: str, timeframe: str, limit: int = 200) -> list[Candle]:
-        symbol = symbol.upper().strip()
-        provider = self.crypto if symbol.endswith(self.CRYPTO_QUOTES) else self.stocks
-        return provider.get_candles(symbol, timeframe, limit)
+        symbol = normalize_symbol(symbol)
+        return (self.crypto if is_crypto(symbol) else self.stocks).get_candles(
+            symbol, timeframe, limit
+        )

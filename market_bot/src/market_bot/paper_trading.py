@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from math import isfinite
 from threading import RLock
 
 from .models import Direction, ExitReason, Position, Signal, utc_now
+from .market_data import Candle
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,14 @@ class PaperTradingAccount:
         self._positions: dict[str, Position] = {}
         self._lock = RLock()
 
-    def open_signal(self, signal: Signal, *, opened_at: datetime | None = None) -> Position:
+    def open_signal(
+        self,
+        signal: Signal,
+        *,
+        opened_at: datetime | None = None,
+        owner_chat_id: int = 0,
+        pending: bool = False,
+    ) -> Position:
         """Open one virtual $100-style position for a new signal."""
         with self._lock:
             if signal.signal_id in self._positions:
@@ -62,6 +70,10 @@ class PaperTradingAccount:
                 stake_usd=self.stake_usd,
                 quantity=quantity,
                 opened_at=opened_at,
+                owner_chat_id=owner_chat_id,
+                commission_rate=self.commission_rate,
+                expires_at=opened_at + self.default_timeout,
+                pending=pending,
             )
             self._positions[signal.signal_id] = position
             return position
@@ -93,7 +105,9 @@ class PaperTradingAccount:
         with self._lock:
             closed: list[Position] = []
             for position in self._positions.values():
-                if not position.is_open or position.signal.symbol != symbol:
+                if not position.is_open or position.pending or position.signal.symbol != symbol:
+                    continue
+                if observed_at < position.opened_at:
                     continue
 
                 signal = position.signal
@@ -111,7 +125,9 @@ class PaperTradingAccount:
                     elif price <= signal.target_price:
                         reason, exit_price = ExitReason.TARGET, signal.target_price
 
-                if reason is None and observed_at >= position.opened_at + self.default_timeout:
+                if reason is None and observed_at >= (
+                    position.expires_at or position.opened_at + self.default_timeout
+                ):
                     reason, exit_price = ExitReason.TIMEOUT, price
 
                 if reason is not None and exit_price is not None:
@@ -147,9 +163,11 @@ class PaperTradingAccount:
                 values = [item for item in values if item.signal.symbol == symbol]
             return values
 
-    def stats(self) -> TradingStats:
+    def stats(self, *, owner_chat_id: int | None = None) -> TradingStats:
         with self._lock:
             all_positions = list(self._positions.values())
+            if owner_chat_id is not None:
+                all_positions = [p for p in all_positions if p.owner_chat_id == owner_chat_id]
             closed = [item for item in all_positions if not item.is_open]
             pnl_values = [item.pnl_usd for item in closed if item.pnl_usd is not None]
             returns = [item.return_pct for item in closed if item.return_pct is not None]
@@ -179,11 +197,11 @@ class PaperTradingAccount:
     ) -> None:
         direction_multiplier = 1 if position.signal.direction is Direction.LONG else -1
         gross_pnl = (
-            (exit_price - position.signal.entry_price)
-            * position.quantity
-            * direction_multiplier
+            (exit_price - position.signal.entry_price) * position.quantity * direction_multiplier
         )
-        commission = self.commission_rate * position.stake_usd * 2
+        commission = position.commission_rate * (
+            position.stake_usd + exit_price * position.quantity
+        )
         pnl = gross_pnl - commission
 
         position.exit_price = exit_price
@@ -192,3 +210,59 @@ class PaperTradingAccount:
         position.pnl_usd = pnl
         position.return_pct = pnl / position.stake_usd
 
+    def process_candle(self, position: Position, candle: Candle) -> bool:
+        """Replay one completed candle. Stop wins if the intrabar order is unknown."""
+        with self._lock:
+            if not position.is_open or candle.timestamp < position.opened_at:
+                return False
+            if position.last_candle_at is not None and candle.timestamp <= position.last_candle_at:
+                return False
+            if position.pending:
+                signal = position.signal
+                position.signal = replace(
+                    signal,
+                    entry_price=candle.open,
+                    target_price=candle.open * signal.target_price / signal.entry_price,
+                    stop_price=candle.open * signal.stop_price / signal.entry_price,
+                )
+                position.quantity = position.stake_usd / candle.open
+                duration = (
+                    position.expires_at or position.opened_at + self.default_timeout
+                ) - position.opened_at
+                position.filled_at = candle.timestamp
+                position.expires_at = candle.timestamp + duration
+                position.pending = False
+            position.last_candle_at = candle.timestamp
+            signal = position.signal
+            expiry = position.expires_at or position.opened_at + self.default_timeout
+            reason = None
+            price = candle.close
+            if candle.timestamp >= expiry:
+                reason, price = ExitReason.TIMEOUT, candle.open
+            elif signal.direction is Direction.LONG:
+                if candle.open <= signal.stop_price:
+                    reason, price = ExitReason.STOP, candle.open
+                elif candle.open >= signal.target_price:
+                    reason, price = ExitReason.TARGET, signal.target_price
+                elif candle.low <= signal.stop_price:
+                    reason, price = ExitReason.STOP, signal.stop_price
+                elif candle.high >= signal.target_price:
+                    reason, price = ExitReason.TARGET, signal.target_price
+            else:
+                if candle.open >= signal.stop_price:
+                    reason, price = ExitReason.STOP, candle.open
+                elif candle.open <= signal.target_price:
+                    reason, price = ExitReason.TARGET, signal.target_price
+                elif candle.high >= signal.stop_price:
+                    reason, price = ExitReason.STOP, signal.stop_price
+                elif candle.low <= signal.target_price:
+                    reason, price = ExitReason.TARGET, signal.target_price
+            if reason is not None:
+                closed_at = (
+                    candle.timestamp
+                    if reason is ExitReason.TIMEOUT
+                    else candle.end(signal.timeframe)
+                )
+                self._close(position, price, reason, closed_at)
+                return True
+            return False

@@ -4,16 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "market-analysis-bot"
-version = "0.1.0"
+version = "1.0.0"
 description = "Market analysis bot with fixed-stake paper trading"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 readme = "README.md"
+dependencies = ["aiogram>=3.31,<4", "matplotlib>=3.8,<4", "python-dotenv>=1.0,<2", "yfinance>=0.2.54,<2", "requests>=2.32,<3"]
 
 [project.scripts]
 market-analysis-bot = "market_bot.__main__:main"
 
 [project.optional-dependencies]
-telegram = ["aiogram>=3.31,<4"]
+telegram = []
+dev = ["build>=1.2,<2", "ruff>=0.14,<1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -21,3 +23,10 @@ pythonpath = ["src"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
